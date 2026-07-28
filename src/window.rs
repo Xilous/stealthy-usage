@@ -91,6 +91,7 @@ struct AppState {
     drag_start_offset: i32,
 
     widget_visible: bool,
+    embed_in_taskbar: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -317,6 +318,16 @@ struct SettingsFile {
     show_codex: bool,
     #[serde(default = "default_show_antigravity")]
     show_antigravity: bool,
+    /// Embed the widget into the taskbar as a WS_CHILD via SetParent.
+    ///
+    /// True keeps upstream behaviour. Set false to use the floating topmost
+    /// popup instead: on Windows 11 the taskbar is a XAML island, and an
+    /// embedded foreign child window is composited *underneath* that XAML
+    /// content while still hit-testing above the taskbar buttons - so the
+    /// widget can be invisible yet still swallow clicks meant for the buttons
+    /// it covers. The popup path renders above everything instead.
+    #[serde(default = "default_embed_in_taskbar")]
+    embed_in_taskbar: bool,
 }
 
 impl Default for SettingsFile {
@@ -331,6 +342,7 @@ impl Default for SettingsFile {
             show_claude_code: true,
             show_codex: false,
             show_antigravity: false,
+            embed_in_taskbar: true,
         }
     }
 }
@@ -340,6 +352,10 @@ fn default_poll_interval() -> u32 {
 }
 
 fn default_widget_visible() -> bool {
+    true
+}
+
+fn default_embed_in_taskbar() -> bool {
     true
 }
 
@@ -392,6 +408,7 @@ fn save_state_settings() {
             show_claude_code: s.show_claude_code,
             show_codex: s.show_codex,
             show_antigravity: s.show_antigravity,
+            embed_in_taskbar: s.embed_in_taskbar,
         });
     }
 }
@@ -495,7 +512,15 @@ fn toggle_widget_visibility(hwnd: HWND) {
     }
 }
 
-fn attach_to_taskbar(hwnd: HWND, requested_index: usize) -> bool {
+/// Locate the taskbar and record it in state, optionally reparenting into it.
+///
+/// `embed` false still does the discovery, the tray hook and the state
+/// bookkeeping - it only skips the SetParent. That matters because
+/// position_at_taskbar() returns early without a taskbar handle, so a widget
+/// that merely skipped this function would never be positioned at all and
+/// would sit at the origin. Returns whether a taskbar was found, not whether
+/// it embedded; the caller reads `embed` for that.
+fn attach_to_taskbar(hwnd: HWND, requested_index: usize, embed: bool) -> bool {
     let taskbars = native_interop::find_taskbars();
     if taskbars.is_empty() {
         diagnose::log("taskbar not found; using fallback popup window");
@@ -522,7 +547,11 @@ fn attach_to_taskbar(hwnd: HWND, requested_index: usize) -> bool {
         native_interop::unhook_win_event(hook);
     }
 
-    native_interop::embed_in_taskbar(hwnd, taskbar.hwnd);
+    if embed {
+        native_interop::embed_in_taskbar(hwnd, taskbar.hwnd);
+    } else {
+        diagnose::log("taskbar located; not reparenting (embed_in_taskbar=false)");
+    }
 
     let tray_notify = native_interop::find_child_window(taskbar.hwnd, "TrayNotifyWnd");
     if tray_notify.is_some() {
@@ -547,7 +576,7 @@ fn attach_to_taskbar(hwnd: HWND, requested_index: usize) -> bool {
         s.tray_notify_hwnd = tray_notify;
         s.win_event_hook = hook;
         s.taskbar_index = index;
-        s.embedded = true;
+        s.embedded = embed;
     }
     true
 }
@@ -1328,12 +1357,16 @@ pub fn run() {
                 drag_start_client_x: 0,
                 drag_start_offset: 0,
                 widget_visible: settings.widget_visible,
+                embed_in_taskbar: settings.embed_in_taskbar,
             });
         }
 
-        // Try to embed in taskbar
-        if attach_to_taskbar(hwnd, settings.taskbar_index) {
-            embedded = true;
+        // Locate the taskbar and record it either way; reparent into it only
+        // when embed_in_taskbar is set (see its doc comment for why it may not
+        // be). Skipping this call entirely would leave no taskbar handle and
+        // the widget would never get positioned.
+        if attach_to_taskbar(hwnd, settings.taskbar_index, settings.embed_in_taskbar) {
+            embedded = settings.embed_in_taskbar;
         }
 
         // If not embedded, fall back to topmost popup with SetLayeredWindowAttributes
@@ -2504,7 +2537,13 @@ unsafe extern "system" fn wnd_proc(
                                 s.tray_offset = new_offset;
                             }
                         }
-                        if attach_to_taskbar(hwnd, target_index) {
+                        // Scoped so the state lock is released before
+                        // attach_to_taskbar takes it again.
+                        let embed = {
+                            let state = lock_state();
+                            state.as_ref().map(|s| s.embed_in_taskbar).unwrap_or(true)
+                        };
+                        if attach_to_taskbar(hwnd, target_index, embed) {
                             position_at_taskbar();
                             render_layered();
                         }
