@@ -92,6 +92,7 @@ struct AppState {
 
     widget_visible: bool,
     embed_in_taskbar: bool,
+    click_through: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -328,6 +329,16 @@ struct SettingsFile {
     /// it covers. The popup path renders above everything instead.
     #[serde(default = "default_embed_in_taskbar")]
     embed_in_taskbar: bool,
+    /// Let mouse input pass straight through the widget (WS_EX_TRANSPARENT).
+    ///
+    /// The widget is a normal interactive window by default, so it swallows
+    /// clicks anywhere it overlaps - including taskbar buttons underneath it.
+    /// WS_EX_NOACTIVATE alone does not help: that only stops it taking focus,
+    /// it still hit-tests. Turning this on makes the widget purely decorative:
+    /// clicks land on whatever is beneath it, and it can no longer be clicked
+    /// or dragged, so the tray icon becomes the only way to control it.
+    #[serde(default = "default_click_through")]
+    click_through: bool,
 }
 
 impl Default for SettingsFile {
@@ -343,6 +354,7 @@ impl Default for SettingsFile {
             show_codex: false,
             show_antigravity: false,
             embed_in_taskbar: true,
+            click_through: false,
         }
     }
 }
@@ -357,6 +369,10 @@ fn default_widget_visible() -> bool {
 
 fn default_embed_in_taskbar() -> bool {
     true
+}
+
+fn default_click_through() -> bool {
+    false
 }
 
 fn default_show_claude_code() -> bool {
@@ -409,6 +425,7 @@ fn save_state_settings() {
             show_codex: s.show_codex,
             show_antigravity: s.show_antigravity,
             embed_in_taskbar: s.embed_in_taskbar,
+            click_through: s.click_through,
         });
     }
 }
@@ -1275,8 +1292,16 @@ pub fn run() {
             settings.show_codex,
             settings.show_antigravity,
         );
+        // NOACTIVATE stops the widget taking focus but it still hit-tests, so
+        // it swallows clicks on whatever it covers. TRANSPARENT is what
+        // actually passes them through (see the click_through doc comment).
+        let mut ex_style = WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE;
+        if settings.click_through {
+            ex_style |= WS_EX_TRANSPARENT;
+            diagnose::log("click_through enabled: adding WS_EX_TRANSPARENT");
+        }
         let hwnd = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
+            ex_style,
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
             WS_POPUP,
@@ -1358,6 +1383,7 @@ pub fn run() {
                 drag_start_offset: 0,
                 widget_visible: settings.widget_visible,
                 embed_in_taskbar: settings.embed_in_taskbar,
+                click_through: settings.click_through,
             });
         }
 
