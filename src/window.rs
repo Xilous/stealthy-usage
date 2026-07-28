@@ -293,7 +293,7 @@ fn lock_state() -> MutexGuard<'static, Option<AppState>> {
 fn settings_path() -> PathBuf {
     let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(appdata)
-        .join("StealthyUsage")
+        .join("StealthyUsageMonitor")
         .join("settings.json")
 }
 
@@ -931,7 +931,7 @@ fn begin_winget_update(hwnd: HWND) {
 }
 
 const STARTUP_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const STARTUP_REGISTRY_KEY: &str = "StealthyUsage";
+const STARTUP_REGISTRY_KEY: &str = "StealthyUsageMonitor";
 
 /// Returns true only if the startup registry value points to this executable.
 fn is_startup_enabled() -> bool {
@@ -1178,7 +1178,7 @@ pub fn run() {
     // Exception: when relaunched after an explorer restart (ENV_RELAUNCH set),
     // wait for the previous instance to release the mutex, then take over.
     let is_relaunch = std::env::var(ENV_RELAUNCH).is_ok();
-    let mutex_name = native_interop::wide_str("Global\\StealthyUsage");
+    let mutex_name = native_interop::wide_str("Global\\StealthyUsageMonitor");
     let _mutex = unsafe {
         let handle = CreateMutexW(None, true, PCWSTR::from_raw(mutex_name.as_ptr()));
         match handle {
@@ -1210,7 +1210,7 @@ pub fn run() {
         }
     };
 
-    let class_name = native_interop::wide_str("StealthyUsage");
+    let class_name = native_interop::wide_str("StealthyUsageMonitor");
 
     unsafe {
         let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();
