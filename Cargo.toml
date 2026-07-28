@@ -1,19 +1,24 @@
 [package]
-name = "claude-code-usage-monitor"
+name = "stealthy-usage"
 version = "1.4.9"
 edition = "2021"
 license = "MIT"
-description = "Claude Code Usage Monitor"
-homepage = "https://codezeno.com.au"
-repository = "https://github.com/CodeZeno/Claude-Code-Usage-Monitor"
+description = "Stealthy Usage"
+homepage = "https://github.com/Xilous/stealthy-usage"
+# The updater derives its GitHub owner/repo from this field at compile time
+# (see github_repo() in src/updater.rs, which parses CARGO_PKG_REPOSITORY).
+# Left on upstream, the fork would check CodeZeno's releases, download their
+# binary and overwrite itself on the next update check.
+repository = "https://github.com/Xilous/stealthy-usage"
 
 [package.metadata.winres]
-CompanyName = "Code Zeno Pty Ltd"
-ProductName = "Claude Code Usage Monitor"
-FileDescription = "Claude Code Usage Monitor"
-OriginalFilename = "claude-code-usage-monitor.exe"
-InternalName = "ClaudeCodeUsageMonitor"
-Comments = "https://codezeno.com.au"
+CompanyName = "Xilous"
+ProductName = "Stealthy Usage"
+FileDescription = "Stealthy Usage"
+OriginalFilename = "stealthy-usage.exe"
+InternalName = "StealthyUsage"
+Comments = "https://github.com/Xilous/stealthy-usage"
+# Retained: the code is Code Zeno's, used under MIT.
 LegalCopyright = "Copyright (C) 2026 Code Zeno Pty Ltd"
 
 [dependencies]
