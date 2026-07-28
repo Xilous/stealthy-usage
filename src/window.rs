@@ -1353,12 +1353,28 @@ pub fn run() {
         // Register system tray icon(s)
         sync_tray_icons(hwnd);
 
-        // Position and show (only if widget_visible preference is true)
+        // Position and show (only if widget_visible preference is true).
+        //
+        // The hide is explicit rather than implied by "we never showed it".
+        // The window is created WS_POPUP with no WS_VISIBLE, but by this point
+        // embedding has reparented it into the taskbar (WS_CHILD + SetParent),
+        // and it comes out of that with WS_VISIBLE set. Skipping the show call
+        // therefore left a saved widget_visible=false ignored: an invisible
+        // window stayed parked on the taskbar, hidden behind the Win11 XAML
+        // surface that paints over foreign child windows, while still
+        // hit-testing - so it silently swallowed clicks on the taskbar buttons
+        // underneath it with nothing on screen to explain why.
         position_at_taskbar();
         if settings.widget_visible {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        } else {
+            let _ = ShowWindow(hwnd, SW_HIDE);
         }
-        diagnose::log("window shown");
+        diagnose::log(if settings.widget_visible {
+            "window shown"
+        } else {
+            "window hidden (widget_visible=false)"
+        });
 
         // Initial render via UpdateLayeredWindow (for embedded) or InvalidateRect (fallback)
         render_layered();
