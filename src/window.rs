@@ -20,7 +20,8 @@ use crate::diagnose;
 use crate::localization::{self, LanguageId, Strings};
 use crate::models::AppUsageData;
 use crate::native_interop::{
-    self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, TIMER_UPDATE_CHECK, WM_APP_TRAY,
+    self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, TIMER_TOPMOST, TIMER_UPDATE_CHECK,
+    WM_APP_TRAY,
     WM_APP_USAGE_UPDATED,
 };
 use crate::poller;
@@ -49,6 +50,7 @@ struct AppState {
     taskbar_hwnd: Option<HWND>,
     tray_notify_hwnd: Option<HWND>,
     win_event_hook: Option<HWINEVENTHOOK>,
+    foreground_hook: Option<HWINEVENTHOOK>,
     is_dark: bool,
     embedded: bool,
     language_override: Option<LanguageId>,
@@ -1345,6 +1347,7 @@ pub fn run() {
                 taskbar_hwnd: None,
                 tray_notify_hwnd: None,
                 win_event_hook: None,
+                foreground_hook: None,
                 is_dark,
                 embedded: false,
                 language_override,
@@ -1398,15 +1401,27 @@ pub fn run() {
         // If not embedded, fall back to topmost popup with SetLayeredWindowAttributes
         if !embedded {
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
-            let _ = SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
+            native_interop::reassert_topmost(hwnd);
+
+            // Setting HWND_TOPMOST once is not enough to stay on top: it is a
+            // shared tier, so activating any other window - clicking a taskbar
+            // button to raise an app, for instance - can leave the widget
+            // behind it and it appears to vanish. Re-assert on every foreground
+            // change (instant, event-driven) with a slow timer as a backstop
+            // for z-order changes that involve no foreground transition.
+            let fg_hook = native_interop::set_foreground_event_hook(on_foreground_changed);
+            if fg_hook.is_some() {
+                diagnose::log("foreground hook installed for topmost recovery");
+            } else {
+                diagnose::log("foreground hook could not be installed");
+            }
+            {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    s.foreground_hook = fg_hook;
+                }
+            }
+            SetTimer(hwnd, native_interop::TIMER_TOPMOST, 1_000, None);
         }
 
         // Register system tray icon(s)
@@ -2228,6 +2243,32 @@ fn compute_anchor_y(anchor_top: i32, anchor_height: i32, widget_height: i32) -> 
 }
 
 /// WinEvent callback for tray icon location changes
+/// Put the widget back on top after another window is brought to the front.
+///
+/// Only meaningful in the non-embedded (floating topmost) mode; an embedded
+/// child window's z-order is resolved inside the taskbar's own hierarchy and
+/// is not affected by foreground changes.
+unsafe extern "system" fn on_foreground_changed(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    _hwnd: HWND,
+    _id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    let target = {
+        let state = lock_state();
+        match state.as_ref() {
+            Some(s) if !s.embedded && s.widget_visible => Some(s.hwnd.to_hwnd()),
+            _ => None,
+        }
+    };
+    if let Some(hwnd) = target {
+        native_interop::reassert_topmost(hwnd);
+    }
+}
+
 unsafe extern "system" fn on_tray_location_changed(
     _hook: HWINEVENTHOOK,
     _event: u32,
@@ -2379,6 +2420,20 @@ unsafe extern "system" fn wnd_proc(
                 }
                 TIMER_UPDATE_CHECK => {
                     begin_update_check(hwnd, false);
+                }
+                TIMER_TOPMOST => {
+                    // Backstop for on_foreground_changed; a no-op when the
+                    // widget is already on top.
+                    let target = {
+                        let state = lock_state();
+                        match state.as_ref() {
+                            Some(s) if !s.embedded && s.widget_visible => Some(s.hwnd.to_hwnd()),
+                            _ => None,
+                        }
+                    };
+                    if let Some(h) = target {
+                        native_interop::reassert_topmost(h);
+                    }
                 }
                 _ => {}
             }
@@ -2771,11 +2826,19 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
-            let hook = {
+            let (hook, fg_hook) = {
                 let state = lock_state();
-                state.as_ref().and_then(|s| s.win_event_hook)
+                match state.as_ref() {
+                    Some(s) => (s.win_event_hook, s.foreground_hook),
+                    None => (None, None),
+                }
             };
             if let Some(h) = hook {
+                native_interop::unhook_win_event(h);
+            }
+            // System-wide hook: leaving it installed would keep delivering
+            // events to a dead callback.
+            if let Some(h) = fg_hook {
                 native_interop::unhook_win_event(h);
             }
             tray_icon::remove_all(hwnd);

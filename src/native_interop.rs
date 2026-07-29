@@ -11,6 +11,7 @@ pub const WS_CLIPSIBLINGS_STYLE: u32 = 0x04000000;
 
 // Win event constants
 pub const EVENT_OBJECT_LOCATIONCHANGE: u32 = 0x800B;
+pub const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
 pub const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
 
 // Timer IDs
@@ -18,6 +19,10 @@ pub const TIMER_POLL: usize = 1;
 pub const TIMER_COUNTDOWN: usize = 2;
 pub const TIMER_RESET_POLL: usize = 3;
 pub const TIMER_UPDATE_CHECK: usize = 4;
+/// Backstop for the foreground hook, which can miss z-order changes that do
+/// not involve a foreground transition (a background window calling
+/// SetWindowPos, or the shell reordering after explorer restarts).
+pub const TIMER_TOPMOST: usize = 5;
 
 // Custom messages
 pub const WM_APP: u32 = 0x8000;
@@ -167,6 +172,53 @@ pub fn set_tray_event_hook(
 /// Get the thread ID that owns a window
 pub fn get_window_thread_id(hwnd: HWND) -> u32 {
     unsafe { GetWindowThreadProcessId(hwnd, None) }
+}
+
+/// Hook foreground-window changes across every process.
+///
+/// Unlike the tray hook this is deliberately system-wide (idProcess and
+/// idThread both 0): the point is to learn when *another* application is
+/// brought to the front, which is exactly when a topmost window can lose its
+/// place in the z-order.
+pub fn set_foreground_event_hook(
+    callback: unsafe extern "system" fn(HWINEVENTHOOK, u32, HWND, i32, i32, u32, u32),
+) -> Option<HWINEVENTHOOK> {
+    unsafe {
+        let hook = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            None,
+            Some(callback),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+        if hook.is_invalid() {
+            None
+        } else {
+            Some(hook)
+        }
+    }
+}
+
+/// Re-assert a window's place at the top of the z-order.
+///
+/// HWND_TOPMOST is a contested tier rather than an exclusive one: any other
+/// app can claim it too, and activating another window can drop us behind it.
+/// Setting it once at creation is therefore not enough to stay visible.
+/// NOMOVE/NOSIZE/NOACTIVATE make this a cheap no-op when already on top.
+pub fn reassert_topmost(hwnd: HWND) {
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
 }
 
 /// Unhook a WinEvent hook
