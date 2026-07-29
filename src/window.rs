@@ -355,8 +355,8 @@ impl Default for SettingsFile {
             show_claude_code: true,
             show_codex: false,
             show_antigravity: false,
-            embed_in_taskbar: true,
-            click_through: false,
+            embed_in_taskbar: default_embed_in_taskbar(),
+            click_through: default_click_through(),
         }
     }
 }
@@ -369,12 +369,18 @@ fn default_widget_visible() -> bool {
     true
 }
 
+// These two defaults are inverted from upstream deliberately. On Windows 11
+// the out-of-the-box combination (embedded + interactive) is broken: the
+// widget is composited beneath the taskbar's XAML content so it is effectively
+// invisible, yet still hit-tests, so it silently swallows clicks on the
+// taskbar buttons it covers. Floating + click-through is the configuration
+// that actually works, so it is what a fresh install should get.
 fn default_embed_in_taskbar() -> bool {
-    true
+    false
 }
 
 fn default_click_through() -> bool {
-    false
+    true
 }
 
 fn default_show_claude_code() -> bool {
@@ -2622,7 +2628,10 @@ unsafe extern "system" fn wnd_proc(
                         // attach_to_taskbar takes it again.
                         let embed = {
                             let state = lock_state();
-                            state.as_ref().map(|s| s.embed_in_taskbar).unwrap_or(true)
+                            state
+                                .as_ref()
+                                .map(|s| s.embed_in_taskbar)
+                                .unwrap_or_else(default_embed_in_taskbar)
                         };
                         if attach_to_taskbar(hwnd, target_index, embed) {
                             position_at_taskbar();
