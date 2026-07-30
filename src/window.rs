@@ -1115,6 +1115,40 @@ const MODEL_RIGHT_MARGIN: i32 = 3;
 const RIGHT_MARGIN: i32 = 1;
 const WIDGET_HEIGHT: i32 = 46;
 
+/// How far the pace marker needle extends above and below the bar.
+const PACE_MARKER_OVERHANG: i32 = 2;
+
+const SESSION_WINDOW: Duration = Duration::from_secs(5 * 60 * 60);
+const WEEKLY_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Fraction of the rate-limit window already elapsed, as 0-100.
+/// This is the utilization the bar would show if usage were spread evenly
+/// across the whole window, i.e. the "on pace" position. None when there is
+/// no reset time or the window has already expired.
+fn pace_percent(resets_at: Option<SystemTime>, window: Duration) -> Option<f64> {
+    let remaining = resets_at?.duration_since(SystemTime::now()).ok()?;
+    let remaining = remaining.min(window);
+    Some((1.0 - remaining.as_secs_f64() / window.as_secs_f64()) * 100.0)
+}
+
+fn claude_pace_markers(data: Option<&AppUsageData>) -> (Option<f64>, Option<f64>) {
+    match data.and_then(|d| d.claude_code.as_ref()) {
+        Some(usage) => (
+            pace_percent(usage.session.resets_at, SESSION_WINDOW),
+            pace_percent(usage.weekly.resets_at, WEEKLY_WINDOW),
+        ),
+        None => (None, None),
+    }
+}
+
+fn pace_marker_color(is_dark: bool) -> Color {
+    if is_dark {
+        Color::from_hex("#E0E0E0")
+    } else {
+        Color::from_hex("#303030")
+    }
+}
+
 fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
     let divider_h = sc(25);
     let divider_top = (sc(WIDGET_HEIGHT) - divider_h) / 2;
@@ -1518,6 +1552,8 @@ fn render_layered() {
         embedded,
         strings,
         session_pct,
+        session_pace,
+        weekly_pace,
         session_text,
         weekly_pct,
         weekly_text,
@@ -1535,27 +1571,32 @@ fn render_layered() {
     ) = {
         let state = lock_state();
         match state.as_ref() {
-            Some(s) => (
-                s.hwnd,
-                s.is_dark,
-                s.embedded,
-                s.language.strings(),
-                s.session_percent,
-                s.session_text.clone(),
-                s.weekly_percent,
-                s.weekly_text.clone(),
-                s.codex_session_percent,
-                s.codex_session_text.clone(),
-                s.codex_weekly_percent,
-                s.codex_weekly_text.clone(),
-                s.antigravity_session_percent,
-                s.antigravity_session_text.clone(),
-                s.antigravity_weekly_percent,
-                s.antigravity_weekly_text.clone(),
-                s.show_claude_code,
-                s.show_codex,
-                s.show_antigravity,
-            ),
+            Some(s) => {
+                let (session_pace, weekly_pace) = claude_pace_markers(s.data.as_ref());
+                (
+                    s.hwnd,
+                    s.is_dark,
+                    s.embedded,
+                    s.language.strings(),
+                    s.session_percent,
+                    session_pace,
+                    weekly_pace,
+                    s.session_text.clone(),
+                    s.weekly_percent,
+                    s.weekly_text.clone(),
+                    s.codex_session_percent,
+                    s.codex_session_text.clone(),
+                    s.codex_weekly_percent,
+                    s.codex_weekly_text.clone(),
+                    s.antigravity_session_percent,
+                    s.antigravity_session_text.clone(),
+                    s.antigravity_weekly_percent,
+                    s.antigravity_weekly_text.clone(),
+                    s.show_claude_code,
+                    s.show_codex,
+                    s.show_antigravity,
+                )
+            }
             None => return,
         }
     };
@@ -1636,8 +1677,10 @@ fn render_layered() {
             &track,
             strings,
             session_pct,
+            session_pace,
             &session_text,
             weekly_pct,
+            weekly_pace,
             &weekly_text,
             codex_session_pct,
             &codex_session_text,
@@ -1712,8 +1755,10 @@ fn paint_content(
     track: &Color,
     strings: Strings,
     session_pct: f64,
+    session_pace: Option<f64>,
     session_text: &str,
     weekly_pct: f64,
+    weekly_pace: Option<f64>,
     weekly_text: &str,
     codex_session_pct: f64,
     codex_session_text: &str,
@@ -1812,6 +1857,7 @@ fn paint_content(
             text_color,
             strings.session_window,
             session_pct,
+            session_pace,
             session_text,
             codex_session_pct,
             codex_session_text,
@@ -1833,6 +1879,7 @@ fn paint_content(
             text_color,
             strings.weekly_window,
             weekly_pct,
+            weekly_pace,
             weekly_text,
             codex_weekly_pct,
             codex_weekly_text,
@@ -2083,10 +2130,23 @@ fn schedule_countdown_timer() {
     ];
     let min_delay = delays.into_iter().flatten().min();
 
-    let ms = min_delay
-        .unwrap_or(Duration::from_secs(60))
-        .as_millis()
-        .max(1000) as u32;
+    // While a pace marker is live, tick at least once a minute so the needle
+    // keeps moving between countdown display changes (which can be hours
+    // apart for long windows).
+    let now = SystemTime::now();
+    let live = |resets_at: Option<SystemTime>| {
+        matches!(resets_at, Some(t) if t.duration_since(now).is_ok())
+    };
+    let pace_marker_live = s.show_claude_code
+        && data.claude_code.as_ref().map_or(false, |usage| {
+            live(usage.session.resets_at) || live(usage.weekly.resets_at)
+        });
+
+    let mut delay = min_delay.unwrap_or(Duration::from_secs(60));
+    if pace_marker_live {
+        delay = delay.min(Duration::from_secs(60));
+    }
+    let ms = delay.as_millis().max(1000) as u32;
 
     unsafe {
         SetTimer(hwnd, TIMER_COUNTDOWN, ms, None);
@@ -3130,6 +3190,8 @@ fn paint(hdc: HDC, hwnd: HWND) {
         is_dark,
         strings,
         session_pct,
+        session_pace,
+        weekly_pace,
         session_text,
         weekly_pct,
         weekly_text,
@@ -3147,25 +3209,30 @@ fn paint(hdc: HDC, hwnd: HWND) {
     ) = {
         let state = lock_state();
         match state.as_ref() {
-            Some(s) => (
-                s.is_dark,
-                s.language.strings(),
-                s.session_percent,
-                s.session_text.clone(),
-                s.weekly_percent,
-                s.weekly_text.clone(),
-                s.codex_session_percent,
-                s.codex_session_text.clone(),
-                s.codex_weekly_percent,
-                s.codex_weekly_text.clone(),
-                s.antigravity_session_percent,
-                s.antigravity_session_text.clone(),
-                s.antigravity_weekly_percent,
-                s.antigravity_weekly_text.clone(),
-                s.show_claude_code,
-                s.show_codex,
-                s.show_antigravity,
-            ),
+            Some(s) => {
+                let (session_pace, weekly_pace) = claude_pace_markers(s.data.as_ref());
+                (
+                    s.is_dark,
+                    s.language.strings(),
+                    s.session_percent,
+                    session_pace,
+                    weekly_pace,
+                    s.session_text.clone(),
+                    s.weekly_percent,
+                    s.weekly_text.clone(),
+                    s.codex_session_percent,
+                    s.codex_session_text.clone(),
+                    s.codex_weekly_percent,
+                    s.codex_weekly_text.clone(),
+                    s.antigravity_session_percent,
+                    s.antigravity_session_text.clone(),
+                    s.antigravity_weekly_percent,
+                    s.antigravity_weekly_text.clone(),
+                    s.show_claude_code,
+                    s.show_codex,
+                    s.show_antigravity,
+                )
+            }
             None => return,
         }
     };
@@ -3214,8 +3281,10 @@ fn paint(hdc: HDC, hwnd: HWND) {
             &track,
             strings,
             session_pct,
+            session_pace,
             &session_text,
             weekly_pct,
+            weekly_pace,
             &weekly_text,
             codex_session_pct,
             &codex_session_text,
@@ -3248,6 +3317,7 @@ fn draw_row(
     text_color: &Color,
     label: &str,
     claude_percent: f64,
+    claude_pace: Option<f64>,
     claude_text: &str,
     codex_percent: f64,
     codex_text: &str,
@@ -3305,10 +3375,12 @@ fn draw_row(
                 y,
                 segment_count,
                 claude_percent,
+                claude_pace,
                 claude_text,
                 claude_accent,
                 track,
                 &claude_value_color,
+                is_dark,
             );
             model_x += model_usage_width(segment_count) + sc(MODEL_RIGHT_MARGIN);
         }
@@ -3319,10 +3391,12 @@ fn draw_row(
                 y,
                 segment_count,
                 codex_percent,
+                None,
                 codex_text,
                 codex_accent,
                 track,
                 &codex_value_color,
+                is_dark,
             );
             model_x += model_usage_width(segment_count) + sc(MODEL_RIGHT_MARGIN);
         }
@@ -3333,10 +3407,12 @@ fn draw_row(
                 y,
                 segment_count,
                 antigravity_percent,
+                None,
                 antigravity_text,
                 antigravity_accent,
                 track,
                 &antigravity_value_color,
+                is_dark,
             );
         }
     }
@@ -3354,10 +3430,12 @@ fn draw_usage_bar(
     y: i32,
     segment_count: i32,
     percent: f64,
+    pace: Option<f64>,
     text: &str,
     accent: &Color,
     track: &Color,
     text_color: &Color,
+    is_dark: bool,
 ) {
     let seg_w = sc(SEGMENT_W);
     let seg_h = sc(SEGMENT_H);
@@ -3411,6 +3489,26 @@ fn draw_usage_bar(
                     let _ = DeleteObject(rgn);
                 }
             }
+        }
+
+        // Pace marker: a thin needle at the position usage "should" be at if
+        // it burned evenly across the window. Bar ahead of the needle means
+        // slow down; bar behind it means there is headroom.
+        if let Some(pace) = pace {
+            let pace = pace.clamp(0.0, 100.0);
+            let bar_w = segment_count * (seg_w + seg_gap) - seg_gap;
+            let marker_w = sc(1).max(1);
+            let marker_x = bar_x + (((bar_w - marker_w) as f64) * pace / 100.0).round() as i32;
+            let overhang = sc(PACE_MARKER_OVERHANG);
+            let marker_rect = RECT {
+                left: marker_x,
+                top: y - overhang,
+                right: marker_x + marker_w,
+                bottom: y + seg_h + overhang,
+            };
+            let brush = CreateSolidBrush(COLORREF(pace_marker_color(is_dark).to_colorref()));
+            FillRect(hdc, &marker_rect, brush);
+            let _ = DeleteObject(brush);
         }
 
         let text_x = bar_x + segment_count * (seg_w + seg_gap) - seg_gap + sc(BAR_RIGHT_MARGIN);
