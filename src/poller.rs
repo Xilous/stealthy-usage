@@ -1521,10 +1521,19 @@ fn is_leap(y: u64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
-/// Format a usage section as "X% · Yh" style text
-pub fn format_line(section: &UsageSection, strings: Strings) -> String {
+/// Which rate-limit window a countdown belongs to. Controls the display
+/// granularity: the 5h session window always shows hours and minutes, the
+/// weekly window always shows days and hours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowKind {
+    Session,
+    Weekly,
+}
+
+/// Format a usage section as "X% · Yh Zm" style text
+pub fn format_line(section: &UsageSection, kind: WindowKind, strings: Strings) -> String {
     let pct = format!("{:.0}%", section.percentage);
-    let cd = format_countdown(section.resets_at, strings);
+    let cd = format_countdown(section.resets_at, kind, strings);
     if cd.is_empty() {
         pct
     } else {
@@ -1532,7 +1541,7 @@ pub fn format_line(section: &UsageSection, strings: Strings) -> String {
     }
 }
 
-fn format_countdown(resets_at: Option<SystemTime>, strings: Strings) -> String {
+fn format_countdown(resets_at: Option<SystemTime>, kind: WindowKind, strings: Strings) -> String {
     let reset = match resets_at {
         Some(t) => t,
         None => return String::new(),
@@ -1543,48 +1552,40 @@ fn format_countdown(resets_at: Option<SystemTime>, strings: Strings) -> String {
         Err(_) => return strings.now.to_string(),
     };
 
-    format_countdown_from_secs(remaining.as_secs(), strings)
+    format_countdown_from_secs(remaining.as_secs(), kind, strings)
 }
 
 /// Calculate how long until the display text would change
-pub fn time_until_display_change(resets_at: Option<SystemTime>) -> Option<Duration> {
+pub fn time_until_display_change(
+    resets_at: Option<SystemTime>,
+    kind: WindowKind,
+) -> Option<Duration> {
     let reset = resets_at?;
     let remaining = reset.duration_since(SystemTime::now()).ok()?;
-    Some(time_until_display_change_from_secs(remaining.as_secs()))
+    Some(time_until_display_change_from_secs(remaining.as_secs(), kind))
 }
 
-fn format_countdown_from_secs(total_secs: u64, strings: Strings) -> String {
-    let total_mins = total_secs / 60;
-    let total_hours = total_secs / 3600;
-    let total_days = total_secs / 86400;
-
-    if total_days >= 1 {
-        format!("{total_days}{}", strings.day_suffix)
-    } else if total_hours >= 1 {
-        format!("{total_hours}{}", strings.hour_suffix)
-    } else if total_mins >= 1 {
-        format!("{total_mins}{}", strings.minute_suffix)
-    } else {
-        format!("{total_secs}{}", strings.second_suffix)
+fn format_countdown_from_secs(total_secs: u64, kind: WindowKind, strings: Strings) -> String {
+    match kind {
+        WindowKind::Session => {
+            let hours = total_secs / 3600;
+            let mins = (total_secs % 3600) / 60;
+            format!("{hours}{} {mins}{}", strings.hour_suffix, strings.minute_suffix)
+        }
+        WindowKind::Weekly => {
+            let days = total_secs / 86400;
+            let hours = (total_secs % 86400) / 3600;
+            format!("{days}{} {hours}{}", strings.day_suffix, strings.hour_suffix)
+        }
     }
 }
 
-fn time_until_display_change_from_secs(total_secs: u64) -> Duration {
-    let total_mins = total_secs / 60;
-    let total_hours = total_secs / 3600;
-    let total_days = total_secs / 86400;
-
-    let current_bucket_start = if total_days >= 1 {
-        total_days * 86400
-    } else if total_hours >= 1 {
-        total_hours * 3600
-    } else if total_mins >= 1 {
-        total_mins * 60
-    } else {
-        total_secs
+fn time_until_display_change_from_secs(total_secs: u64, kind: WindowKind) -> Duration {
+    let granularity = match kind {
+        WindowKind::Session => 60,
+        WindowKind::Weekly => 3600,
     };
-
-    Duration::from_secs(total_secs.saturating_sub(current_bucket_start) + 1)
+    Duration::from_secs(total_secs % granularity + 1)
 }
 
 /// Returns true if either section has reached "now" (reset time has passed).
@@ -1603,6 +1604,40 @@ pub fn app_is_past_reset(data: &AppUsageData) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::localization::LanguageId;
+
+    #[test]
+    fn session_countdown_always_shows_hours_and_minutes() {
+        let strings = LanguageId::English.strings();
+        let fmt = |secs| format_countdown_from_secs(secs, WindowKind::Session, strings);
+
+        assert_eq!(fmt(4 * 3600 + 59 * 60 + 59), "4h 59m");
+        assert_eq!(fmt(3600), "1h 0m");
+        assert_eq!(fmt(45 * 60 + 30), "0h 45m");
+        assert_eq!(fmt(30), "0h 0m");
+    }
+
+    #[test]
+    fn weekly_countdown_always_shows_days_and_hours() {
+        let strings = LanguageId::English.strings();
+        let fmt = |secs| format_countdown_from_secs(secs, WindowKind::Weekly, strings);
+
+        // 1 day 22 hours must not collapse to "1d"
+        assert_eq!(fmt(86400 + 22 * 3600 + 15 * 60), "1d 22h");
+        assert_eq!(fmt(6 * 86400 + 23 * 3600), "6d 23h");
+        assert_eq!(fmt(22 * 3600 + 59 * 60), "0d 22h");
+        assert_eq!(fmt(59), "0d 0h");
+    }
+
+    #[test]
+    fn display_change_follows_minute_and_hour_boundaries() {
+        let next = time_until_display_change_from_secs;
+
+        assert_eq!(next(2 * 60 + 5, WindowKind::Session), Duration::from_secs(6));
+        assert_eq!(next(60, WindowKind::Session), Duration::from_secs(1));
+        assert_eq!(next(2 * 3600 + 5, WindowKind::Weekly), Duration::from_secs(6));
+        assert_eq!(next(3600, WindowKind::Weekly), Duration::from_secs(1));
+    }
 
     fn usage_with_session_percent(percentage: f64) -> UsageData {
         UsageData {

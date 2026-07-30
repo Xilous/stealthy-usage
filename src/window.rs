@@ -700,28 +700,33 @@ fn refresh_usage_texts(state: &mut AppState) {
     };
 
     if let Some(claude_code) = data.claude_code.as_ref() {
-        state.session_text = poller::format_line(&claude_code.session, strings);
-        state.weekly_text = poller::format_line(&claude_code.weekly, strings);
+        state.session_text =
+            poller::format_line(&claude_code.session, poller::WindowKind::Session, strings);
+        state.weekly_text =
+            poller::format_line(&claude_code.weekly, poller::WindowKind::Weekly, strings);
     } else if state.show_claude_code {
         state.session_text = "!".to_string();
         state.weekly_text = "!".to_string();
     }
 
     if let Some(codex) = data.codex.as_ref() {
-        state.codex_session_text = poller::format_line(&codex.session, strings);
-        state.codex_weekly_text = poller::format_line(&codex.weekly, strings);
+        state.codex_session_text =
+            poller::format_line(&codex.session, poller::WindowKind::Session, strings);
+        state.codex_weekly_text =
+            poller::format_line(&codex.weekly, poller::WindowKind::Weekly, strings);
     } else if state.show_codex {
         state.codex_session_text = "!".to_string();
         state.codex_weekly_text = "!".to_string();
     }
 
     if let Some(antigravity) = data.antigravity.as_ref() {
-        state.antigravity_session_text = poller::format_line(&antigravity.session, strings);
+        state.antigravity_session_text =
+            poller::format_line(&antigravity.session, poller::WindowKind::Session, strings);
         state.antigravity_weekly_text =
             if antigravity.weekly.resets_at.is_none() && antigravity.weekly.percentage == 0.0 {
                 "--".to_string()
             } else {
-                poller::format_line(&antigravity.weekly, strings)
+                poller::format_line(&antigravity.weekly, poller::WindowKind::Weekly, strings)
             };
     } else if state.show_antigravity {
         state.antigravity_session_text = "!".to_string();
@@ -1110,7 +1115,7 @@ const DIVIDER_RIGHT_MARGIN: i32 = 10;
 const LABEL_WIDTH: i32 = 18;
 const LABEL_RIGHT_MARGIN: i32 = 10;
 const BAR_RIGHT_MARGIN: i32 = 4;
-const TEXT_WIDTH: i32 = 62;
+const TEXT_WIDTH: i32 = 88;
 const MODEL_RIGHT_MARGIN: i32 = 3;
 const RIGHT_MARGIN: i32 = 1;
 const WIDGET_HEIGHT: i32 = 46;
@@ -2108,25 +2113,19 @@ fn schedule_countdown_timer() {
         }
     }
 
+    let session_change = |usage: &crate::models::UsageData| {
+        poller::time_until_display_change(usage.session.resets_at, poller::WindowKind::Session)
+    };
+    let weekly_change = |usage: &crate::models::UsageData| {
+        poller::time_until_display_change(usage.weekly.resets_at, poller::WindowKind::Weekly)
+    };
     let delays = [
-        data.claude_code
-            .as_ref()
-            .and_then(|usage| poller::time_until_display_change(usage.session.resets_at)),
-        data.claude_code
-            .as_ref()
-            .and_then(|usage| poller::time_until_display_change(usage.weekly.resets_at)),
-        data.codex
-            .as_ref()
-            .and_then(|usage| poller::time_until_display_change(usage.session.resets_at)),
-        data.codex
-            .as_ref()
-            .and_then(|usage| poller::time_until_display_change(usage.weekly.resets_at)),
-        data.antigravity
-            .as_ref()
-            .and_then(|usage| poller::time_until_display_change(usage.session.resets_at)),
-        data.antigravity
-            .as_ref()
-            .and_then(|usage| poller::time_until_display_change(usage.weekly.resets_at)),
+        data.claude_code.as_ref().and_then(session_change),
+        data.claude_code.as_ref().and_then(weekly_change),
+        data.codex.as_ref().and_then(session_change),
+        data.codex.as_ref().and_then(weekly_change),
+        data.antigravity.as_ref().and_then(session_change),
+        data.antigravity.as_ref().and_then(weekly_change),
     ];
     let min_delay = delays.into_iter().flatten().min();
 
