@@ -1,9 +1,15 @@
 name: Release
 
-# Tag push builds and publishes. workflow_dispatch builds only, leaving the
-# binary as a run artifact, so packaging can be exercised without releasing.
+# Push to main builds and publishes a release tagged v<Cargo.toml version>,
+# unless that tag already exists on the remote, in which case the run builds
+# only. So a merge that bumps the version cuts a release, and a merge that
+# does not bump is just a build check. Tag push still builds and publishes
+# for that tag. workflow_dispatch builds only, leaving the binary as a run
+# artifact, so packaging can be exercised without releasing.
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
@@ -43,6 +49,33 @@ jobs:
             throw "Version mismatch: Cargo.toml says $crateVer, tag says $tagVer"
           }
 
+      # Decide whether this run publishes and under which tag. Empty output
+      # means build only. Main pushes release v<crate version>; the ls-remote
+      # guard makes a merge without a version bump a no-op instead of a
+      # duplicate release. The tag the release action then creates uses
+      # GITHUB_TOKEN, so it cannot re-trigger this workflow.
+      - name: Decide release tag
+        id: release_tag
+        shell: pwsh
+        run: |
+          $crateVer = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $tag = ""
+          if ("${{ github.event_name }}" -eq "push") {
+            if ("${{ github.ref }}".StartsWith("refs/tags/")) {
+              $tag = "${{ github.ref_name }}"
+            } elseif ("${{ github.ref }}" -eq "refs/heads/main") {
+              git ls-remote --exit-code origin "refs/tags/v$crateVer"
+              if ($LASTEXITCODE -ne 0) {
+                $tag = "v$crateVer"
+              } else {
+                Write-Host "Tag v$crateVer already exists, building without releasing"
+              }
+            }
+          }
+          if ($tag) { Write-Host "This run will publish $tag" } else { Write-Host "Build only" }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          exit 0
+
       - name: Build release binary
         run: cargo build --release
 
@@ -61,8 +94,9 @@ jobs:
           retention-days: 30
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: steps.release_tag.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.release_tag.outputs.tag }}
           files: target/release/${{ env.RELEASE_ASSET_NAME }}
           generate_release_notes: true
