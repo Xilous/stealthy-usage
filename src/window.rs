@@ -1103,12 +1103,21 @@ fn set_startup_enabled(enable: bool) {
     }
 }
 
-// Dimensions matching the C# version
+// Dimensions matching the C# version. SEGMENT_W/SEGMENT_GAP/SEGMENT_COUNT no
+// longer describe what is drawn - they only define the overall bar width, which
+// stays fixed so both rows and their trailing text line up. How that width is
+// subdivided is per-row: the session bar is one continuous block, the weekly bar
+// is split into one block per day of the window.
 const SEGMENT_W: i32 = 10;
 const SEGMENT_H: i32 = 13;
 const SEGMENT_GAP: i32 = 1;
 const SEGMENT_COUNT: i32 = 10;
 const CORNER_RADIUS: i32 = 2;
+
+/// Blocks in the session bar: one continuous fill, no internal dividers.
+const SESSION_BLOCKS: i32 = 1;
+/// Blocks in the weekly bar, one per day of the 7-day window.
+const WEEKLY_BLOCKS: i32 = 7;
 
 const LEFT_DIVIDER_W: i32 = 3;
 const DIVIDER_RIGHT_MARGIN: i32 = 10;
@@ -1186,10 +1195,7 @@ fn row_bar_segment_count(active_models: i32) -> i32 {
 }
 
 fn total_widget_width_for(active_models: i32) -> i32 {
-    let bar_segments = row_bar_segment_count(active_models);
-    let model_width = (sc(SEGMENT_W) + sc(SEGMENT_GAP)) * bar_segments - sc(SEGMENT_GAP)
-        + sc(BAR_RIGHT_MARGIN)
-        + sc(TEXT_WIDTH);
+    let model_width = model_usage_width(row_bar_segment_count(active_models));
 
     sc(LEFT_DIVIDER_W)
         + sc(DIVIDER_RIGHT_MARGIN)
@@ -1861,6 +1867,7 @@ fn paint_content(
             is_dark,
             text_color,
             strings.session_window,
+            SESSION_BLOCKS,
             session_pct,
             session_pace,
             session_text,
@@ -1883,6 +1890,7 @@ fn paint_content(
             is_dark,
             text_color,
             strings.weekly_window,
+            WEEKLY_BLOCKS,
             weekly_pct,
             weekly_pace,
             weekly_text,
@@ -3315,6 +3323,7 @@ fn draw_row(
     is_dark: bool,
     text_color: &Color,
     label: &str,
+    blocks: i32,
     claude_percent: f64,
     claude_pace: Option<f64>,
     claude_text: &str,
@@ -3373,6 +3382,7 @@ fn draw_row(
                 model_x,
                 y,
                 segment_count,
+                blocks,
                 claude_percent,
                 claude_pace,
                 claude_text,
@@ -3389,6 +3399,7 @@ fn draw_row(
                 model_x,
                 y,
                 segment_count,
+                blocks,
                 codex_percent,
                 None,
                 codex_text,
@@ -3405,6 +3416,7 @@ fn draw_row(
                 model_x,
                 y,
                 segment_count,
+                blocks,
                 antigravity_percent,
                 None,
                 antigravity_text,
@@ -3418,9 +3430,26 @@ fn draw_row(
 }
 
 fn model_usage_width(segment_count: i32) -> i32 {
+    bar_total_width(segment_count) + sc(BAR_RIGHT_MARGIN) + sc(TEXT_WIDTH)
+}
+
+/// Overall pixel width of one usage bar, independent of how many blocks it is
+/// drawn as.
+fn bar_total_width(segment_count: i32) -> i32 {
     (sc(SEGMENT_W) + sc(SEGMENT_GAP)) * segment_count - sc(SEGMENT_GAP)
-        + sc(BAR_RIGHT_MARGIN)
-        + sc(TEXT_WIDTH)
+}
+
+/// Left and right edge of block `index` of `blocks`, as offsets from the bar's
+/// left edge. Blocks tile the full bar width with `gap` between them, and the
+/// leftover pixels from an uneven division are spread out rather than dumped on
+/// the last block.
+fn block_bounds(bar_w: i32, blocks: i32, gap: i32, index: i32) -> (i32, i32) {
+    if blocks <= 1 {
+        return (0, bar_w);
+    }
+    let fillable = (bar_w - gap * (blocks - 1)).max(0) as f64;
+    let edge = |i: i32| (fillable * i as f64 / blocks as f64).round() as i32 + i * gap;
+    (edge(index), edge(index + 1) - gap)
 }
 
 fn draw_usage_bar(
@@ -3428,6 +3457,7 @@ fn draw_usage_bar(
     bar_x: i32,
     y: i32,
     segment_count: i32,
+    blocks: i32,
     percent: f64,
     pace: Option<f64>,
     text: &str,
@@ -3436,17 +3466,20 @@ fn draw_usage_bar(
     text_color: &Color,
     is_dark: bool,
 ) {
-    let seg_w = sc(SEGMENT_W);
     let seg_h = sc(SEGMENT_H);
     let seg_gap = sc(SEGMENT_GAP);
     let corner_r = sc(CORNER_RADIUS);
+    let bar_w = bar_total_width(segment_count);
+    let blocks = blocks.max(1);
 
     unsafe {
         let percent_clamped = percent.clamp(0.0, 100.0);
-        let segment_percent = 100.0 / segment_count as f64;
+        let segment_percent = 100.0 / blocks as f64;
 
-        for i in 0..segment_count {
-            let seg_x = bar_x + i * (seg_w + seg_gap);
+        for i in 0..blocks {
+            let (block_left, block_right) = block_bounds(bar_w, blocks, seg_gap, i);
+            let seg_x = bar_x + block_left;
+            let seg_w = block_right - block_left;
             let seg_start = (i as f64) * segment_percent;
             let seg_end = seg_start + segment_percent;
 
@@ -3495,7 +3528,6 @@ fn draw_usage_bar(
         // slow down; bar behind it means there is headroom.
         if let Some(pace) = pace {
             let pace = pace.clamp(0.0, 100.0);
-            let bar_w = segment_count * (seg_w + seg_gap) - seg_gap;
             let marker_w = sc(1).max(1);
             let marker_x = bar_x + (((bar_w - marker_w) as f64) * pace / 100.0).round() as i32;
             let overhang = sc(PACE_MARKER_OVERHANG);
@@ -3510,7 +3542,7 @@ fn draw_usage_bar(
             let _ = DeleteObject(brush);
         }
 
-        let text_x = bar_x + segment_count * (seg_w + seg_gap) - seg_gap + sc(BAR_RIGHT_MARGIN);
+        let text_x = bar_x + bar_w + sc(BAR_RIGHT_MARGIN);
         let mut text_wide: Vec<u16> = text.encode_utf16().collect();
         let mut text_rect = RECT {
             left: text_x,
